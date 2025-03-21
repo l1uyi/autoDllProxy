@@ -209,8 +209,8 @@ def dig_main():
     loop.run_until_complete(excuteFile())
 def init():
     parser = argparse.ArgumentParser(epilog="""
-Auto compile mode: python dll_proxy.py -D target.dll -C auto --detect auto\n
-Manual mode: python dll_proxy.py -D target.dll -C manually --detect manually\n
+Auto compile mode: python autoDllProxy.py -D target.dll -C auto --detect auto\n
+Manual mode: python autoDllProxy.py -D target.dll -C manually --detect manually\n
     """,
     formatter_class=argparse.RawTextHelpFormatter
     )
